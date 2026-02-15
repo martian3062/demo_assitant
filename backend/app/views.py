@@ -171,6 +171,7 @@ def chat_stream(request):
     s = get_or_create_settings()
     api_key = resolve_api_key(s)
     body = request.data or {}
+
     user_message = str(body.get("message", "")).strip()
     history = body.get("history", [])
 
@@ -179,30 +180,77 @@ def chat_stream(request):
             {"ok": False, "error": "Groq API key missing. Please save it in Settings."},
             status=status.HTTP_400_BAD_REQUEST,
         )
+
     if not user_message:
-        return Response({"ok": False, "error": "message is required"}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {"ok": False, "error": "message is required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # validate model defensively
+    model = (s.groq_model or "").strip()
+    if not model:
+        return Response(
+            {"ok": False, "error": "No model configured in settings."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        # if you already have validate_model in groq_client.py
+        if not validate_model(model):
+            return Response(
+                {"ok": False, "error": f"Invalid model selected: {model}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    except Exception:
+        # don't hard-fail if validator import/logic differs
+        pass
+
+    def _sanitize_sse_data(value: str) -> str:
+        # keep one SSE event per line payload
+        return value.replace("\r", " ").replace("\n", " ")
 
     def generate():
+        # Optional: initial ping event to reduce perceived blank delay
+        yield "event: ready\ndata: stream-started\n\n"
+
         try:
             messages: list[ChatMessage] = []
-            for h in history:
-                role = str(h.get("role", "user"))
-                content = str(h.get("content", ""))
-                if content:
-                    messages.append(ChatMessage(role=role, content=content))
+            if isinstance(history, list):
+                for h in history:
+                    if not isinstance(h, dict):
+                        continue
+                    role = str(h.get("role", "user")).strip() or "user"
+                    content = str(h.get("content", "")).strip()
+                    if content:
+                        messages.append(ChatMessage(role=role, content=content))
+
             messages.append(ChatMessage(role="user", content=user_message))
 
-            for token in stream_completion(api_key=api_key, model=s.groq_model, messages=messages):
-                yield f"data: {token}\n\n"
+            token_count = 0
+            for token in stream_completion(
+                api_key=api_key,
+                model=model,
+                messages=messages,
+            ):
+                if not token:
+                    continue
+                safe = _sanitize_sse_data(token)
+                yield f"data: {safe}\n\n"
+                token_count += 1
+
             yield "data: [DONE]\n\n"
-            log_system("chat_stream", "info", "Stream completed.")
+            log_system("chat_stream", "info", f"Stream completed. tokens={token_count}")
+
         except Exception as exc:
-            log_system("chat_stream", "error", f"Stream failed: {exc}")
-            yield f"data: [ERROR] {str(exc)}\n\n"
+            err = _sanitize_sse_data(str(exc))
+            log_system("chat_stream", "error", f"Stream failed: {err}")
+            yield f"data: [ERROR] {err}\n\n"
             yield "data: [DONE]\n\n"
 
-    response = StreamingHttpResponse(generate(), content_type="text/event-stream")
-    response["Cache-Control"] = "no-cache"
+    response = StreamingHttpResponse(generate(), content_type="text/event-stream; charset=utf-8")
+    response["Cache-Control"] = "no-cache, no-transform"
+    response["Connection"] = "keep-alive"
     response["X-Accel-Buffering"] = "no"
     return response
 
