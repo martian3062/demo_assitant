@@ -1,19 +1,14 @@
 import axios from "axios";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000/api";
+/* =========================
+   Types
+========================= */
+export type ChatMessage = { role: string; content: string };
 
-const api = axios.create({
-  baseURL: API_BASE_URL,
-  timeout: 30000
-});
-
-export type HealthResponse = { ok: boolean; service?: string; time?: string };
-export type ModelCatalog = Record<string, string[]>;
-export type SettingsResponse = {
-  id?: number;
-  groq_model?: string;
-  sandbox_default?: boolean;
-  has_key?: boolean;
+export type AppSettings = {
+  has_key: boolean;
+  groq_model: string;
+  sandbox_default: boolean;
 };
 
 export type Agent = {
@@ -32,11 +27,11 @@ export type Agent = {
 export type RunLog = {
   id: number;
   agent: number | null;
-  agent_name?: string | null;
+  agent_name?: string;
   status: "success" | "failed" | "sandboxed";
   message: string;
   started_at: string;
-  ended_at: string;
+  ended_at: string | null;
 };
 
 export type SystemLog = {
@@ -47,47 +42,53 @@ export type SystemLog = {
   created_at: string;
 };
 
-export type TrendItem = {
-  date: string;
-  success: number;
-  failed: number;
-  sandboxed: number;
-  total: number;
-};
+/* =========================
+   Base URL
+   - Vercel uses VITE_API_BASE_URL
+   - local fallback remains localhost
+========================= */
+const API_BASE =
+  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, "") ||
+  "http://127.0.0.1:8000/api";
 
-export type AnalyticsSummary = {
-  days: number;
-  trend: TrendItem[];
-  status_totals: {
-    success: number;
-    failed: number;
-    sandboxed: number;
-  };
-  top_agents: { agent_id: number; name: string; total: number }[];
-  total_runs: number;
-};
+const http = axios.create({
+  baseURL: API_BASE,
+  timeout: 30000,
+});
 
-export type NewsItem = {
-  title: string;
-  link: string;
-  published: string;
-  summary: string;
-  source: string;
-};
-
-export async function health(): Promise<HealthResponse> {
-  const { data } = await api.get("/health");
-  return data;
+function toError(e: any, fallback = "Request failed"): Error {
+  const msg = e?.response?.data?.error || e?.response?.data?.detail || e?.message || fallback;
+  return new Error(String(msg));
 }
 
-export async function getModelCatalog(): Promise<{ catalog: ModelCatalog }> {
-  const { data } = await api.get("/models/catalog");
-  return data;
+/* =========================
+   Health + Settings + Models
+========================= */
+export async function health() {
+  try {
+    const { data } = await http.get("/health");
+    return data;
+  } catch (e) {
+    throw toError(e, "Health check failed");
+  }
 }
 
-export async function getSettings(): Promise<SettingsResponse> {
-  const { data } = await api.get("/settings");
-  return data;
+export async function getModelCatalog() {
+  try {
+    const { data } = await http.get("/models/catalog");
+    return data as { ok: boolean; catalog: Record<string, string[]> };
+  } catch (e) {
+    throw toError(e, "Failed to fetch model catalog");
+  }
+}
+
+export async function getSettings() {
+  try {
+    const { data } = await http.get("/settings");
+    return data as AppSettings;
+  } catch (e) {
+    throw toError(e, "Failed to fetch settings");
+  }
 }
 
 export async function saveGroqSettings(payload: {
@@ -96,29 +97,36 @@ export async function saveGroqSettings(payload: {
   groqKey?: string;
   groq_key?: string;
   groq_model?: string;
-  model?: string;
   sandbox_default?: boolean;
-}): Promise<{ ok: boolean; settings?: SettingsResponse; error?: string }> {
-  const { data } = await api.post("/settings/groq-key", payload);
-  return data;
+}) {
+  try {
+    const { data } = await http.post("/settings/groq-key", payload);
+    return data;
+  } catch (e) {
+    throw toError(e, "Failed to save settings");
+  }
 }
 
-export async function chat(payload: {
-  message: string;
-  history?: { role: string; content: string }[];
-}): Promise<{ ok: boolean; reply?: string; error?: string }> {
-  const { data } = await api.post("/chat", payload);
-  return data;
+/* =========================
+   Chat + Stream + STT
+========================= */
+export async function chat(payload: { message: string; history?: ChatMessage[] }) {
+  try {
+    const { data } = await http.post("/chat", payload);
+    return data as { ok: boolean; reply?: string; error?: string };
+  } catch (e) {
+    throw toError(e, "Chat failed");
+  }
 }
 
 export async function chatStream(
-  payload: { message: string; history?: Array<{ role: string; content: string }> },
+  payload: { message: string; history?: ChatMessage[] },
   onToken: (token: string) => void
 ): Promise<void> {
   const res = await fetch(`${API_BASE}/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
   });
 
   if (!res.ok || !res.body) {
@@ -136,98 +144,178 @@ export async function chatStream(
 
     buffer += decoder.decode(value, { stream: true });
 
-    // SSE events split by blank line
-    const events = buffer.split("\n\n");
-    buffer = events.pop() || "";
+    // SSE frames split by blank line
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? "";
 
-    for (const evt of events) {
-      const lines = evt.split("\n");
+    for (const frame of frames) {
+      const lines = frame.split("\n");
       for (const line of lines) {
         if (!line.startsWith("data:")) continue;
         const data = line.slice(5).trim();
-        if (!data || data === "[DONE]") continue;
+
+        if (!data) continue;
+        if (data === "[DONE]") return;
+        if (data.startsWith("[ERROR]")) {
+          throw new Error(data.replace("[ERROR]", "").trim() || "Unknown stream error");
+        }
+        if (data === "stream-started") continue; // optional keepalive/status event
         onToken(data);
       }
     }
   }
 }
 
-
-export async function sttAudio(audioBlob: Blob): Promise<{ ok: boolean; text?: string; error?: string }> {
-  const form = new FormData();
-  form.append("audio", audioBlob, "voice.webm");
-  const { data } = await api.post("/stt", form, {
-    headers: { "Content-Type": "multipart/form-data" }
-  });
-  return data;
+export async function sttAudio(blob: Blob) {
+  try {
+    const form = new FormData();
+    form.append("audio", blob, "voice.webm");
+    const { data } = await http.post("/stt", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+    return data as { ok: boolean; text?: string; error?: string };
+  } catch (e) {
+    throw toError(e, "STT failed");
+  }
 }
 
-export async function setupOpenClaw(): Promise<any> {
-  const { data } = await api.post("/setup/openclaw", {});
-  return data;
+/* =========================
+   Setup / OpenClaw bridge
+========================= */
+export async function setupOpenClaw() {
+  try {
+    const { data } = await http.post("/setup/openclaw");
+    return data;
+  } catch (e) {
+    throw toError(e, "Setup failed");
+  }
 }
 
-export async function listAgents(): Promise<{ items: Agent[] }> {
-  const { data } = await api.get("/agents");
-  return data;
+/* =========================
+   Agents
+========================= */
+export async function listAgents() {
+  try {
+    const { data } = await http.get("/agents");
+    return data as { ok: boolean; items: Agent[] };
+  } catch (e) {
+    throw toError(e, "Failed to list agents");
+  }
 }
 
-export async function createAgent(payload: Partial<Agent>): Promise<{ ok: boolean; item?: Agent }> {
-  const { data } = await api.post("/agents", payload);
-  return data;
+export async function createAgent(payload: Partial<Agent>) {
+  try {
+    const { data } = await http.post("/agents", payload);
+    return data;
+  } catch (e) {
+    throw toError(e, "Failed to create agent");
+  }
 }
 
-export async function createAgentFromChat(prompt: string): Promise<{ ok: boolean; item?: Agent; error?: string }> {
-  const { data } = await api.post("/agents/create-from-chat", { prompt });
-  return data;
+export async function createAgentFromChat(payload: { prompt: string }) {
+  try {
+    const { data } = await http.post("/agents/create-from-chat", payload);
+    return data;
+  } catch (e) {
+    throw toError(e, "Failed to create agent from chat");
+  }
 }
 
-export async function listAgentTemplates(): Promise<{ items: any[] }> {
-  const { data } = await api.get("/agents/templates");
-  return data;
+export async function listAgentTemplates() {
+  try {
+    const { data } = await http.get("/agents/templates");
+    return data as { ok: boolean; items: Array<{ key: string; name: string; description?: string }> };
+  } catch (e) {
+    throw toError(e, "Failed to fetch templates");
+  }
 }
 
-export async function createAgentFromTemplate(key: string): Promise<{ ok: boolean; item?: Agent; error?: string }> {
-  const { data } = await api.post("/agents/create-from-template", { key });
-  return data;
+export async function createAgentFromTemplate(template_key: string) {
+  try {
+    const { data } = await http.post("/agents/create-from-template", { template_key });
+    return data;
+  } catch (e) {
+    throw toError(e, "Failed to create from template");
+  }
 }
 
-export async function runAgentNow(agentId: number): Promise<any> {
-  const { data } = await api.post(`/agents/${agentId}/run-now`, {});
-  return data;
+export async function runAgentNow(id: number) {
+  try {
+    const { data } = await http.post(`/agents/${id}/run-now`);
+    return data;
+  } catch (e) {
+    throw toError(e, "Failed to run agent");
+  }
 }
 
-export async function toggleAgentActive(agentId: number): Promise<{ ok: boolean; item?: Agent }> {
-  const { data } = await api.post(`/agents/${agentId}/toggle-active`, {});
-  return data;
+export async function toggleAgentActive(id: number) {
+  try {
+    const { data } = await http.post(`/agents/${id}/toggle-active`);
+    return data;
+  } catch (e) {
+    throw toError(e, "Failed to toggle active");
+  }
 }
 
-export async function toggleAgentSandbox(agentId: number): Promise<{ ok: boolean; item?: Agent }> {
-  const { data } = await api.post(`/agents/${agentId}/toggle-sandbox`, {});
-  return data;
+export async function toggleAgentSandbox(id: number) {
+  try {
+    const { data } = await http.post(`/agents/${id}/toggle-sandbox`);
+    return data;
+  } catch (e) {
+    throw toError(e, "Failed to toggle sandbox");
+  }
 }
 
-export async function listRuns(): Promise<{ items: RunLog[] }> {
-  const { data } = await api.get("/runs");
-  return data;
+/* =========================
+   Logs
+========================= */
+export async function listRuns() {
+  try {
+    const { data } = await http.get("/runs");
+    return data as { ok: boolean; items: RunLog[] };
+  } catch (e) {
+    throw toError(e, "Failed to load run logs");
+  }
 }
 
-export async function listSystemLogs(): Promise<{ items: SystemLog[] }> {
-  const { data } = await api.get("/system-logs");
-  return data;
+export async function listSystemLogs() {
+  try {
+    const { data } = await http.get("/system-logs");
+    return data as { ok: boolean; items: SystemLog[] };
+  } catch (e) {
+    throw toError(e, "Failed to load system logs");
+  }
 }
 
-export async function getAnalyticsSummary(days = 14): Promise<AnalyticsSummary> {
-  const { data } = await api.get(`/analytics/summary?days=${days}`);
-  return data;
+/* =========================
+   Analytics
+========================= */
+export async function getAnalyticsSummary(days = 14) {
+  try {
+    const { data } = await http.get(`/analytics/summary?days=${days}`);
+    return data;
+  } catch (e) {
+    throw toError(e, "Failed to load analytics");
+  }
 }
 
-export async function searchNews(q: string, limit = 8): Promise<{ ok: boolean; items?: NewsItem[]; error?: string }> {
-  const { data } = await api.get(`/news/search?q=${encodeURIComponent(q)}&limit=${limit}`);
-  return data;
+/* =========================
+   News + Crawl
+========================= */
+export async function searchNews(q: string, limit = 8) {
+  try {
+    const { data } = await http.get(`/news/search?q=${encodeURIComponent(q)}&limit=${limit}`);
+    return data as { ok: boolean; items: any[] };
+  } catch (e) {
+    throw toError(e, "News search failed");
+  }
 }
 
-export async function crawlExtract(url: string): Promise<{ ok: boolean; item?: any; error?: string }> {
-  const { data } = await api.post("/crawl/extract", { url });
-  return data;
+export async function crawlExtract(url: string) {
+  try {
+    const { data } = await http.post("/crawl/extract", { url });
+    return data as { ok: boolean; item?: { url: string; title?: string; text?: string }; error?: string };
+  } catch (e) {
+    throw toError(e, "Crawl extract failed");
+  }
 }
