@@ -1,0 +1,107 @@
+# -----------------------------
+# OS / Editor
+# -----------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# -----------------------------
+# Python / Django
+# -----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.pyre/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Django local DB & uploads
+db.sqlite3
+**/db.sqlite3
+media/
+staticfiles/
+
+# Python packaging/build
+build/
+dist/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# -----------------------------
+# Node / React / Vite
+# -----------------------------
+node_modules/
+**/node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+.yarn-cache/
+.parcel-cache/
+
+# Vite / frontend outputs
+.vite/
+**/.vite/
+dist/
+**/dist/
+build/
+**/build/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# -----------------------------
+# Tauri / Rust
+# -----------------------------
+target/
+**/target/
+src-tauri/target/
+
+# -----------------------------
+# Environment / secrets
+# -----------------------------
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!.env.*.example
+
+# Keys / certs
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+secrets/
+secret/
+
+# -----------------------------
+# Temporary / cache
+# -----------------------------
+tmp/
+temp/
+.cache/
+*.tmp
