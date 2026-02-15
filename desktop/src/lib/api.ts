@@ -112,18 +112,18 @@ export async function chat(payload: {
 }
 
 export async function chatStream(
-  payload: { message: string; history?: { role: string; content: string }[] },
+  payload: { message: string; history?: Array<{ role: string; content: string }> },
   onToken: (token: string) => void
 ): Promise<void> {
-  const res = await fetch(`${API_BASE_URL}/chat/stream`, {
+  const res = await fetch(`${API_BASE}/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
 
   if (!res.ok || !res.body) {
-    const text = await res.text().catch(() => "Streaming failed");
-    throw new Error(text || "Streaming failed");
+    const text = await res.text().catch(() => "");
+    throw new Error(`Stream failed: ${res.status} ${text}`);
   }
 
   const reader = res.body.getReader();
@@ -135,19 +135,23 @@ export async function chatStream(
     if (done) break;
 
     buffer += decoder.decode(value, { stream: true });
-    const chunks = buffer.split("\n\n");
-    buffer = chunks.pop() || "";
 
-    for (const chunk of chunks) {
-      const line = chunk.split("\n").find((l) => l.startsWith("data: "));
-      if (!line) continue;
-      const token = line.replace("data: ", "");
-      if (token === "[DONE]") return;
-      if (token.startsWith("[ERROR]")) throw new Error(token);
-      onToken(token);
+    // SSE events split by blank line
+    const events = buffer.split("\n\n");
+    buffer = events.pop() || "";
+
+    for (const evt of events) {
+      const lines = evt.split("\n");
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === "[DONE]") continue;
+        onToken(data);
+      }
     }
   }
 }
+
 
 export async function sttAudio(audioBlob: Blob): Promise<{ ok: boolean; text?: string; error?: string }> {
   const form = new FormData();
